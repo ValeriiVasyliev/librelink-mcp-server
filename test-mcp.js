@@ -1,7 +1,33 @@
 #!/usr/bin/env node
 
 import { spawn } from 'child_process';
-import { createWriteStream } from 'fs';
+import { createWriteStream, copyFileSync, existsSync, unlinkSync, renameSync } from 'fs';
+import { homedir } from 'os';
+import { join } from 'path';
+
+/**
+ * This suite exercises the real `configure_credentials` tool, which writes to
+ * the user's config file. Back it up first and always put it back, so running
+ * the tests can never destroy real credentials.
+ */
+const CONFIG_FILE = join(homedir(), '.librelink-mcp', 'config.json');
+const CONFIG_BACKUP = `${CONFIG_FILE}.test-backup`;
+
+function backupUserConfig() {
+  if (existsSync(CONFIG_FILE)) {
+    copyFileSync(CONFIG_FILE, CONFIG_BACKUP);
+  }
+}
+
+function restoreUserConfig() {
+  if (existsSync(CONFIG_BACKUP)) {
+    renameSync(CONFIG_BACKUP, CONFIG_FILE);
+    console.log('[TEST] Restored your original ~/.librelink-mcp/config.json');
+  } else if (existsSync(CONFIG_FILE)) {
+    // There was no config before the run; do not leave test credentials behind.
+    unlinkSync(CONFIG_FILE);
+  }
+}
 
 /**
  * Test script for LibreLink MCP Server
@@ -254,6 +280,8 @@ class MCPTester {
     let passed = 0;
     let total = 0;
 
+    backupUserConfig();
+
     try {
       // Start server
       const serverStarted = await this.startServer();
@@ -281,6 +309,7 @@ class MCPTester {
       this.log(`❌ Test suite error: ${error.message}`);
     } finally {
       await this.stopServer();
+      restoreUserConfig();
     }
 
     console.log('\n📊 Test Results');
@@ -301,5 +330,11 @@ class MCPTester {
 }
 
 // Run tests
+process.on('SIGINT', () => { restoreUserConfig(); process.exit(130); });
+process.on('SIGTERM', () => { restoreUserConfig(); process.exit(143); });
+
 const tester = new MCPTester();
-tester.runAllTests().catch(console.error);
+tester.runAllTests().catch(error => {
+  console.error(error);
+  restoreUserConfig();
+});
