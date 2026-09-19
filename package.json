@@ -15,9 +15,10 @@
     "configure": "node dist/configure.js",
     "lint": "echo 'No linting configured'",
     "typecheck": "tsc --noEmit",
-    "test": "npm run test:mcp && npm run test:analytics",
+    "test": "npm run test:mcp && npm run test:analytics && npm run test:api",
     "test:mcp": "node test-mcp.js",
     "test:analytics": "node test-analytics.js",
+    "test:api": "node test-librelink-api.js",
     "prepack": "npm run build",
     "install:global": "npm run build && npm install -g ."
   },
@@ -34,7 +35,6 @@
   "homepage": "https://github.com/amansk/librelink-mcp-server#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.3",
-    "libre-link-unofficial-api": "^1.0.0-alpha.7",
     "axios": "^1.6.0",
     "zod": "^3.22.4",
     "dotenv": "^16.3.1"

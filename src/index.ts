@@ -44,7 +44,7 @@ function handleError(error: any): any {
   console.error('LibreLink MCP Error:', error);
   
   if (error instanceof Error && 'code' in error) {
-    const mcpError = error as MCPError;
+    const mcpError = error as unknown as MCPError;
     return {
       content: [{
         type: 'text',
@@ -345,13 +345,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new Error('LibreLink not configured. Use configure_credentials first.');
         }
 
-        const isValid = await client.validateConnection();
+        const result = await client.validateConnection();
         return {
           content: [{
             type: 'text',
-            text: isValid 
+            text: result.valid
               ? 'LibreLink connection validated successfully!'
-              : 'LibreLink connection failed. Check credentials and sensor status.'
+              : `LibreLink connection failed [${result.code}]: ${result.message}`
           }]
         };
       }
