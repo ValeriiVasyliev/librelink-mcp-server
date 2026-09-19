@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
-import { LibreLinkClient as UnofficialClient } from 'libre-link-unofficial-api';
+import { LibreLinkUpApi, LibreLinkApiError, MINIMUM_LLU_VERSION } from './dist/librelink-api.js';
 import { ConfigManager } from './dist/config.js';
 
 /**
- * Diagnostic tool to understand LibreLink account setup
+ * Diagnose a configured LibreLink Up account: authentication, the headers the
+ * API now requires, and whether any patient data is actually shared with it.
+ * Prints no passwords, tokens or glucose values.
  */
 
 async function diagnoseAccount() {
@@ -12,94 +14,83 @@ async function diagnoseAccount() {
   console.log('==============================\n');
 
   const configManager = new ConfigManager();
-  
+
   if (!configManager.isConfigured()) {
     console.log('❌ No credentials configured. Run: npm run configure');
     return;
   }
 
   const config = configManager.getConfig();
-  console.log(`📧 Testing account: ${config.credentials.email}`);
-  console.log(`🌍 Region: ${config.client.region}\n`);
+  const api = new LibreLinkUpApi({
+    email: config.credentials.email,
+    password: config.credentials.password,
+    region: config.client.region,
+    version: config.client.version
+  });
 
+  console.log(`🌍 Configured region: ${config.client.region}`);
+  console.log(`🔢 Configured version: ${config.client.version} → sending: ${api.lluVersion} (minimum ${MINIMUM_LLU_VERSION})\n`);
+
+  console.log('1. Authenticating...');
   try {
-    // Test authentication
-    console.log('1. Testing authentication...');
-    const client = new UnofficialClient({
-      email: config.credentials.email,
-      password: config.credentials.password
-    });
-
-    await client.login();
-    console.log('✅ Authentication successful!\n');
-
-    // Check user info
-    console.log('2. Checking user info...');
-    const user = client.me;
-    console.log(`   User ID: ${user?.id || 'Unknown'}`);
-    console.log(`   Email: ${user?.email || 'Unknown'}`);
-    console.log(`   First Name: ${user?.firstName || 'Unknown'}`);
-    console.log(`   Last Name: ${user?.lastName || 'Unknown'}\n`);
-
-    // Check connections
-    console.log('3. Checking connections...');
-    try {
-      const connections = await client.fetchConnections();
-      console.log(`   Found ${connections?.length || 0} connection(s)`);
-      
-      if (!connections || connections.length === 0) {
-        console.log('   ❌ No connections found');
-        console.log('\n💡 This means either:');
-        console.log('   a) You\'re using a LibreLinkUp account with no shared data');
-        console.log('   b) You need to set up sharing from your main LibreLink app');
-        console.log('   c) You should use your main LibreLink credentials instead');
-      } else {
-        console.log('   ✅ Connections found!');
-        connections.forEach((conn, index) => {
-          console.log(`   Connection ${index + 1}:`);
-          console.log(`     Patient ID: ${conn.patientId || 'Unknown'}`);
-          console.log(`     First Name: ${conn.firstName || 'Unknown'}`);
-          console.log(`     Last Name: ${conn.lastName || 'Unknown'}`);
-          console.log(`     Country: ${conn.country || 'Unknown'}`);
-        });
-      }
-    } catch (error) {
-      console.log(`   ❌ Error checking connections: ${error.message}`);
-    }
-
-    console.log('\n4. Testing glucose reading...');
-    try {
-      const reading = await client.read();
-      console.log('   ✅ Glucose reading successful!');
-      console.log(`   Current glucose: ${reading.value} mg/dL`);
-      console.log(`   Timestamp: ${reading.timestamp}`);
-      console.log(`   Trend: ${reading.trendType}`);
-    } catch (error) {
-      console.log(`   ❌ Error reading glucose: ${error.message}`);
-      
-      if (error.message.includes('No connections')) {
-        console.log('\n🔧 SOLUTION NEEDED:');
-        console.log('   Your account authenticated but has no glucose data connections.');
-        console.log('   Options:');
-        console.log('   1. Set up sharing from your main LibreLink app to this LibreLinkUp account');
-        console.log('   2. Or use your main LibreLink app credentials instead');
-        console.log('   3. Or check if you have the correct LibreLinkUp account');
-      }
-    }
-
+    await api.login();
   } catch (error) {
-    console.log(`❌ Authentication failed: ${error.message}`);
-    console.log('\n🔧 Check:');
-    console.log('   1. Email and password are correct');
-    console.log('   2. You\'re using the right region (US/EU)');
-    console.log('   3. Account is not locked or suspended');
+    const code = error instanceof LibreLinkApiError ? error.code : 'UNKNOWN';
+    console.log(`   ❌ [${code}] ${error.message}`);
+    return;
   }
 
-  console.log('\n📋 Account Type Guidance:');
-  console.log('   • LibreLink (main app): Your personal glucose readings');
-  console.log('   • LibreLinkUp (sharing app): Shared readings from others');
-  console.log('   • If you want YOUR data: use LibreLink credentials');
-  console.log('   • If you want SHARED data: use LibreLinkUp credentials');
+  console.log('   ✅ Authenticated');
+  console.log(`   Host in use: ${api.apiUrl}`);
+
+  const accountType = api.me?.accountType;
+  console.log(`   Account type: ${accountType ?? 'unknown'}` +
+    (accountType === 'pat' ? ' (patient / sensor wearer)' : accountType === 'car' ? ' (LibreLinkUp follower)' : ''));
+  console.log('   Account-Id header: derived from the user id (SHA-256), sent on every authenticated request\n');
+
+  console.log('2. Checking patient connections...');
+  let connections = [];
+  try {
+    connections = await api.fetchConnections();
+  } catch (error) {
+    const code = error instanceof LibreLinkApiError ? error.code : 'UNKNOWN';
+    console.log(`   ❌ [${code}] ${error.message}`);
+    return;
+  }
+
+  console.log(`   Found ${connections.length} connection(s)`);
+
+  if (connections.length === 0) {
+    console.log('   ❌ No patient data is shared with this account.\n');
+    if (accountType === 'pat') {
+      console.log('   This is the sensor wearer\'s own LibreLink account. LibreLink Up serves glucose');
+      console.log('   data to *followers*, so this account cannot read its own readings here.');
+      console.log('\n   Fix:');
+      console.log('     1. LibreLink app → Connected Apps → LibreLinkUp → invite a follower (a different email).');
+      console.log('     2. Install LibreLinkUp, sign up with that email, accept the invitation.');
+      console.log('     3. Run: npm run configure  — and enter the follower credentials.');
+    } else {
+      console.log('   Ask the sensor wearer to invite this account from LibreLink app →');
+      console.log('   Connected Apps → LibreLinkUp, then accept the invitation in the LibreLinkUp app.');
+    }
+    return;
+  }
+
+  connections.forEach((conn, index) => {
+    console.log(`   Connection ${index + 1}: patientId ${conn.patientId} (status ${conn.status ?? 'unknown'})`);
+  });
+
+  console.log('\n3. Fetching sensor data...');
+  try {
+    const graph = await api.fetchGraph();
+    console.log('   ✅ Data retrieved');
+    console.log(`   Active sensors: ${graph.activeSensors.length}`);
+    console.log(`   History points: ${graph.graphData.length}`);
+    console.log(`   Current measurement present: ${graph.connection.glucoseItem ? 'yes' : 'no'}`);
+  } catch (error) {
+    const code = error instanceof LibreLinkApiError ? error.code : 'UNKNOWN';
+    console.log(`   ❌ [${code}] ${error.message}`);
+  }
 }
 
 diagnoseAccount().catch(console.error);
