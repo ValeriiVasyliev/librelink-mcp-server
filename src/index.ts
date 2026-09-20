@@ -233,25 +233,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         const days = (args?.days as number) || 7;
-        const readings = await client.getGlucoseHistory(days * 24);
-        const stats = analytics.calculateGlucoseStats(readings);
-        
+        const requestedHours = days * 24;
+        const readings = await client.getGlucoseHistory(requestedHours);
+        const stats = analytics.calculateGlucoseStats(readings, requestedHours);
+        const { target_low, target_high } = configManager.getConfig().ranges;
+
         return {
           content: [{
             type: 'text',
             text: JSON.stringify({
-              analysis_period_days: days,
+              requested_period_days: days,
+              // What the data actually spans; the API rarely returns the full request.
+              analyzed_period_days: Math.round((stats.coverage.spanHours / 24) * 100) / 100,
+              coverage: stats.coverage,
               average_glucose: stats.average,
               glucose_management_indicator: stats.gmi,
               time_in_range: {
-                target_70_180: stats.timeInRange,
-                below_70: stats.timeBelowRange,
-                above_180: stats.timeAboveRange
+                [`target_${target_low}_${target_high}`]: stats.timeInRange,
+                [`below_${target_low}`]: stats.timeBelowRange,
+                [`above_${target_high}`]: stats.timeAboveRange
               },
               variability: {
                 standard_deviation: stats.standardDeviation,
                 coefficient_of_variation: stats.coefficientOfVariation
-              }
+              },
+              caveats: stats.caveats
             }, null, 2)
           }]
         };
@@ -264,18 +270,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const period = (args?.period as 'daily' | 'weekly' | 'monthly') || 'weekly';
         const daysToAnalyze = period === 'daily' ? 1 : period === 'weekly' ? 7 : 30;
-        const readings = await client.getGlucoseHistory(daysToAnalyze * 24);
-        const trends = analytics.analyzeTrends(readings, period);
-        
+        const requestedHours = daysToAnalyze * 24;
+        const readings = await client.getGlucoseHistory(requestedHours);
+        const trends = analytics.analyzeTrends(readings, period, requestedHours);
+
         return {
           content: [{
             type: 'text',
             text: JSON.stringify({
               period: period,
+              coverage: trends.coverage,
               patterns: trends.patterns,
+              // null means "could not be judged from this data", never "fine".
               dawn_phenomenon: trends.dawnPhenomenon,
               meal_response_average: trends.mealResponse,
-              overnight_stability: trends.overnightStability
+              largest_excursion: trends.largestExcursion,
+              overnight_stability: trends.overnightStability,
+              hypoglycemic_events: trends.hypoglycemicEvents,
+              hyperglycemic_periods: trends.hyperglycemicPeriods,
+              not_assessed: trends.notAssessed
             }, null, 2)
           }]
         };
