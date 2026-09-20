@@ -1,7 +1,8 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import { LibreLinkConfig } from './types.js';
+import { MINIMUM_LLU_VERSION } from './librelink-api.js';
 
 const CONFIG_DIR = join(homedir(), '.librelink-mcp');
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
@@ -12,7 +13,7 @@ export const DEFAULT_CONFIG: LibreLinkConfig = {
     password: ''
   },
   client: {
-    version: '4.12.0',
+    version: MINIMUM_LLU_VERSION,
     region: 'US'
   },
   cache: {
@@ -71,9 +72,11 @@ export class ConfigManager {
   saveConfig(config: LibreLinkConfig): void {
     try {
       // Ensure config directory exists
-      mkdirSync(CONFIG_DIR, { recursive: true });
+      mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
 
-      writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+      // The file holds LibreLink credentials, so keep it readable by the user only.
+      writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 });
+      chmodSync(CONFIG_FILE, 0o600);
       this.config = config;
     } catch (error) {
       throw new Error(`Failed to save config: ${error}`);

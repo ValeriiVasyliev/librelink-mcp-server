@@ -20,8 +20,8 @@ A local [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server t
 
 ## 📋 Prerequisites
 
-- **LibreLink Account**: Active FreeStyle LibreLink account with glucose data
-- **Compatible Sensor**: FreeStyle Libre 2 or 3 with data sharing enabled
+- **LibreLinkUp follower account**: This server reads glucose data through the LibreLink **Up** (follower) API, so it needs credentials for an account that *follows* a sensor wearer — not the wearer's own LibreLink app account. See [Account requirements](#-account-requirements).
+- **Compatible Sensor**: FreeStyle Libre 2 or 3 with LibreLinkUp sharing enabled
 - **Node.js**: Version 18.0.0 or higher
 - **Claude Desktop**: For MCP integration
 
@@ -49,8 +49,8 @@ npm run configure
 ```
 
 You'll be prompted for:
-- **Email**: Your LibreLink account email
-- **Password**: Your LibreLink account password
+- **Email**: Your LibreLinkUp **follower** account email (see [Account requirements](#-account-requirements))
+- **Password**: That account's password
 - **Region**: US or EU (based on your location)
 - **Target ranges**: Glucose target ranges (default: 70-180 mg/dL)
 
@@ -82,6 +82,86 @@ Add to your Claude Desktop configuration file:
 ### 5. Restart Claude Desktop
 
 Restart Claude Desktop to load the new MCP server.
+
+## 👤 Account requirements
+
+LibreLink Up exposes glucose data through **connections**: a sensor wearer (a *patient* account) shares
+their data with a *follower* (care) account, and the follower reads it. This server authenticates as the
+follower.
+
+If you configure the wearer's own LibreLink credentials, login succeeds but `llu/connections` returns an
+empty list, and every glucose tool fails with `NO_CONNECTIONS`. To set sharing up:
+
+1. In the **LibreLink** app (the wearer's app), open **Connected Apps → LibreLinkUp**.
+2. Invite a follower by email. Use an email address that is not the wearer's LibreLink login.
+3. Install the **LibreLinkUp** app, sign up with that email, and accept the invitation.
+4. Run `npm run configure` and enter the **LibreLinkUp follower** email and password.
+
+You can confirm the account type at any time:
+
+```bash
+node diagnose-account.js
+```
+
+An `accountType` of `pat` with zero connections means you configured the wearer's account.
+
+## 🔄 LibreLink Up API compatibility (October 2025 change)
+
+### Root cause of the `403 / status 920` error
+
+Around October 2025 Abbott tightened the LibreLink Up API. Requests now fail unless they carry two things:
+
+```text
+Error fetching data from Libre Link Up API with status 403.
+{ "data": { "minimumVersion": "4.16.0" }, "status": 920 }
+```
+
+Verified against the live API:
+
+| Request | Result |
+|---|---|
+| `version: 4.7.0`, no `Account-Id` | `HTTP 403`, body `status: 920`, `minimumVersion: 4.16.0` |
+| `version: 4.16.0`, no `Account-Id` | `HTTP 400`, body `{"message":"RequiredHeaderMissing"}` |
+| `version: 4.16.0` **and** `Account-Id` | `HTTP 200` |
+
+The previous dependency, `libre-link-unofficial-api`, hardcodes `version: 4.7.0` (its last release,
+`1.0.0-alpha.7`, predates the change) and never sends `Account-Id`. It also offers no supported way to add
+the header — its request builder is private and overwrites caller-supplied headers.
+
+### The fix
+
+`libre-link-unofficial-api` was replaced with a dedicated client, `src/librelink-api.ts`, that sends the
+headers the API now requires. No other functionality changed: all 8 MCP tools keep the same names,
+arguments and output shapes.
+
+### Required request headers
+
+| Header | Value | Notes |
+|---|---|---|
+| `product` | `llu.android` | Constant |
+| `version` | `>= 4.16.0` | Below this the API returns `403` / `920` |
+| `Account-Id` | SHA-256 hex digest of the authenticated user's id | Required on every **authenticated** request; omitted on login |
+| `Authorization` | `Bearer <token>` | From the login response's `authTicket` |
+| `content-type` | `application/json` | |
+
+`Account-Id` is derived at runtime from the `data.user.id` the login response returns. No account id is
+ever hardcoded, and the value is never logged.
+
+### Configuration requirements
+
+`~/.librelink-mcp/config.json` gains no new required fields. `client.version` now defaults to `4.16.0`,
+and any configured value below the minimum is **raised to `4.16.0` at runtime** so an old saved config
+cannot reintroduce the failure. Set it explicitly only if Abbott raises the minimum again before this
+project is updated:
+
+```json
+{
+  "client": { "version": "4.16.0", "region": "EU" }
+}
+```
+
+`client.region` (`US` or `EU`) selects the starting host. If the API answers with a redirect, the client
+resolves the correct regional host automatically, so a wrong region self-corrects.
 
 ## 🩸 Usage Examples
 
@@ -176,6 +256,9 @@ npm run test:mcp
 # Test analytics with mock data
 npm run test:analytics
 
+# Test the LibreLink Up API client (mocked HTTP, no credentials needed)
+npm run test:api
+
 # Test with real LibreLink data (requires configuration)
 node test-real-data.js
 ```
@@ -199,7 +282,8 @@ npm run dev
 librelink-mcp-server/
 ├── src/
 │   ├── index.ts              # Main MCP server
-│   ├── librelink-client.ts   # LibreLink API wrapper
+│   ├── librelink-api.ts      # LibreLink Up HTTP client (auth, headers, regions, errors)
+│   ├── librelink-client.ts   # Glucose-domain wrapper over the API client
 │   ├── glucose-analytics.ts  # Analytics and statistics
 │   ├── config.ts             # Configuration management
 │   ├── configure.ts          # CLI configuration tool
@@ -220,7 +304,7 @@ librelink-mcp-server/
 
 ### Credential Security
 - **Local storage** - Credentials stored in `~/.librelink-mcp/config.json`
-- **File permissions** - Automatically set to user-only access (600)
+- **File permissions** - Written with, and enforced at, mode `600` (user read/write only); the config directory is `700`
 - **No cloud storage** - Never uploaded or shared
 
 ### Security Best Practices
@@ -242,9 +326,10 @@ ls -la ~/.librelink-mcp/config.json
 - **API may change** - community maintained compatibility
 
 ### Data Sharing Requirements
-- Ensure your **LibreLink app has data sharing enabled**
+- Ensure your **LibreLink app has LibreLinkUp sharing enabled**
 - Your **sensor must be active** and transmitting data
-- **LibreLink account** (not LibreLinkUp) credentials required
+- **LibreLinkUp follower account** credentials required — the wearer's own LibreLink account has no
+  connections and cannot be read. See [Account requirements](#-account-requirements).
 
 ### Sensor Compatibility
 - ✅ **FreeStyle Libre 2**
@@ -253,22 +338,51 @@ ls -la ~/.librelink-mcp/config.json
 
 ## 🐛 Troubleshooting
 
-### Common Issues
+Every failure is reported with a specific error code, so the code tells you which problem you have.
+An authentication or API-compatibility failure is never reported as a sensor problem.
 
-**"No connections found"**
-- Verify you're using LibreLink (not LibreLinkUp) credentials
-- Check that data sharing is enabled in your LibreLink app
-- Ensure your sensor is active and connected
+| Code | Meaning | What to do |
+|---|---|---|
+| `API_VERSION_UNSUPPORTED` | `HTTP 403` / `status 920` — the API requires a newer client version | See [below](#http-403--status-920) |
+| `MISSING_ACCOUNT_ID` | `HTTP 400 RequiredHeaderMissing` — the `Account-Id` header was not sent | Re-run `validate_connection`; if it persists, the login response shape changed |
+| `INVALID_CREDENTIALS` | The API rejected the email/password | Confirm they work in the LibreLinkUp app |
+| `TERMS_NOT_ACCEPTED` | The account must accept updated terms or privacy policy | Sign in once with the LibreLinkUp app and accept the prompts |
+| `NO_CONNECTIONS` | Login worked, but no patient is shared with this account | See [Account requirements](#-account-requirements) |
+| `SENSOR_UNAVAILABLE` | Connected, but the sensor returned no data | Sensor may be warming up, out of Bluetooth range, or expired |
+| `TOKEN_EXPIRED` | The auth token was rejected | Handled automatically by one re-login; persistent failures mean the password changed |
+| `REGION_ERROR` | The regional host could not be resolved | Check `client.region` in the config and your network |
+| `RATE_LIMITED` | `HTTP 429` or `status 429` | Wait a few minutes before retrying; avoid repeated login attempts |
+| `NETWORK_ERROR` | The API host was unreachable | Check internet connectivity and LibreLink service status |
+| `UNKNOWN_API_ERROR` | An unrecognised API response | Report it with the HTTP and API status from the message |
 
-**"Authentication failed"**
-- Double-check email and password
-- Verify correct region (US/EU)
-- Try logging into LibreLink app to confirm credentials
+### HTTP 403 / status 920
 
-**"Connection timeout"**
-- Check internet connection
-- Verify LibreLink service status
-- Try again after a few minutes
+```text
+Error fetching data from Libre Link Up API with status 403.
+{ "data": { "minimumVersion": "4.16.0" }, "status": 920 }
+```
+
+The API is rejecting the `version` header as too old. Since this fix the client enforces a floor of
+`4.16.0`, so you should only see this if Abbott has raised the minimum again.
+
+1. Check the version actually being sent — the error message states it.
+2. Confirm you are running the current build: `npm run build`.
+3. Raise the minimum: set `client.version` in `~/.librelink-mcp/config.json` to the `minimumVersion`
+   in the error, then restart the server. Values **below** the built-in floor are ignored.
+4. If a newer version alone does not help and you now get `HTTP 400 RequiredHeaderMissing`, the API has
+   added another required header; open an issue.
+
+### "No connections found" / `NO_CONNECTIONS`
+
+Login succeeded, so the credentials are correct — the account simply follows no sensor wearer. This is
+almost always because the **wearer's own** LibreLink credentials were configured instead of a
+**LibreLinkUp follower** account. See [Account requirements](#-account-requirements).
+
+### Authentication failures
+
+- Confirm the email and password work in the **LibreLinkUp** app.
+- `TERMS_NOT_ACCEPTED` means the account has a pending terms-of-use prompt; only the app can clear it.
+- The region self-corrects via redirect, so a wrong `client.region` is not the cause.
 
 ### Getting Help
 
@@ -308,7 +422,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🙏 Acknowledgments
 
-- **libre-link-unofficial-api** - Community-maintained LibreLink API client
+- **libre-link-unofficial-api** - The original API client this project was built on, and the source of
+  the response type definitions. Replaced by `src/librelink-api.ts` in the October 2025 API fix.
 - **MCP Protocol** - Anthropic's Model Context Protocol
 - **FreeStyle Libre Community** - Inspiration and reverse engineering efforts
 - **Open Source Diabetes Projects** - Nightscout, OpenAPS, and others

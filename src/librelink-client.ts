@@ -1,77 +1,73 @@
-import { LibreLinkClient as UnofficialClient, GlucoseReading as LibreGlucoseReading } from 'libre-link-unofficial-api';
-import { GlucoseReading, SensorInfo, TrendType, LibreLinkConfig, MCPError } from './types.js';
+import {
+  LibreLinkUpApi,
+  LibreLinkApiError,
+  RawGlucoseItem,
+  LibreActiveSensor,
+  LibreGraphResponse
+} from './librelink-api.js';
+import { GlucoseReading, SensorInfo, TrendType, LibreLinkConfig } from './types.js';
+
+/** LibreLink Up `TrendArrow` values, in API order. */
+const TREND_ARROW_MAP: TrendType[] = [
+  TrendType.FLAT,             // 0 - NotComputable
+  TrendType.SINGLE_DOWN,      // 1
+  TrendType.FORTY_FIVE_DOWN,  // 2
+  TrendType.FLAT,             // 3
+  TrendType.FORTY_FIVE_UP,    // 4
+  TrendType.SINGLE_UP         // 5
+];
+
+/** Device type ids we can name with confidence. */
+const DEVICE_TYPE_NAMES: Record<number, string> = {
+  40066: 'FreeStyle Libre 3'
+};
+
+/** A reading older than this is not treated as a live sensor value. */
+const STALE_READING_MS = 15 * 60 * 1000;
+
+export interface ConnectionValidationResult {
+  valid: boolean;
+  code?: string;
+  message?: string;
+}
 
 export class LibreLinkClient {
-  private client: UnofficialClient;
+  private api: LibreLinkUpApi;
   private config: LibreLinkConfig;
-  private isLoggedIn: boolean = false;
   private lastReading: GlucoseReading | null = null;
   private cache: Map<string, { data: any; timestamp: number }> = new Map();
 
   constructor(config: LibreLinkConfig) {
     this.config = config;
-    this.client = new UnofficialClient({
+    this.api = new LibreLinkUpApi({
       email: config.credentials.email,
-      password: config.credentials.password
+      password: config.credentials.password,
+      region: config.client.region,
+      version: config.client.version
     });
   }
 
-  private async ensureLoggedIn(): Promise<void> {
-    if (!this.isLoggedIn) {
-      try {
-        await this.client.login();
-        this.isLoggedIn = true;
-      } catch (error) {
-        throw this.createError('AUTH_FAILED', 'Failed to authenticate with LibreLink', error);
-      }
+  /** The `version` header actually in use, after the minimum is enforced. */
+  get lluVersion(): string {
+    return this.api.lluVersion;
+  }
+
+  private mapTrendArrow(trendArrow?: number): TrendType {
+    if (typeof trendArrow !== 'number') {
+      return TrendType.FLAT;
     }
+    return TREND_ARROW_MAP[trendArrow] ?? TrendType.FLAT;
   }
 
-  private createError(code: string, message: string, details?: any): MCPError {
-    return {
-      code,
-      message,
-      details
-    };
-  }
-
-  private mapTrendType(trendType: string): TrendType {
-    switch (trendType?.toLowerCase()) {
-      case 'flat':
-      case 'stable': 
-        return TrendType.FLAT;
-      case 'up':
-      case 'rising':
-        return TrendType.SINGLE_UP;
-      case 'down':
-      case 'falling':
-        return TrendType.SINGLE_DOWN;
-      case 'rapidlyup':
-      case 'rapidly rising':
-        return TrendType.DOUBLE_UP;
-      case 'rapidlydown':
-      case 'rapidly falling':
-        return TrendType.DOUBLE_DOWN;
-      case 'slightlyup':
-      case 'slightly rising':
-        return TrendType.FORTY_FIVE_UP;
-      case 'slightlydown':
-      case 'slightly falling':
-        return TrendType.FORTY_FIVE_DOWN;
-      default: 
-        return TrendType.FLAT;
-    }
-  }
-
-  private mapGlucoseReading(libreReading: LibreGlucoseReading): GlucoseReading {
-    const value = libreReading.value;
+  private mapGlucoseReading(item: RawGlucoseItem): GlucoseReading {
+    const value = item.ValueInMgPerDl;
     const isHigh = value > this.config.ranges.target_high;
     const isLow = value < this.config.ranges.target_low;
-    
+
     return {
       value,
-      timestamp: libreReading.timestamp,
-      trend: this.mapTrendType(libreReading.trendType),
+      timestamp: new Date(item.Timestamp),
+      trend: this.mapTrendArrow(item.TrendArrow),
       isHigh,
       isLow,
       color: isHigh ? 'red' : isLow ? 'orange' : 'green'
@@ -106,133 +102,168 @@ export class LibreLinkClient {
     }
   }
 
-  async getCurrentGlucose(): Promise<GlucoseReading> {
-    const cacheKey = 'current_glucose';
-    const cached = this.getCachedData(cacheKey);
+  /**
+   * One graph fetch backs current glucose, history and sensor info, so a single
+   * cache entry keeps all three within the API's rate limits.
+   */
+  private async getGraph(): Promise<LibreGraphResponse> {
+    const cached = this.getCachedData('graph');
     if (cached) {
       return cached;
     }
 
-    await this.ensureLoggedIn();
+    const graph = await this.api.fetchGraph();
+    this.setCachedData('graph', graph);
+    return graph;
+  }
 
+  /**
+   * Preserve typed API errors verbatim; they already carry an accurate code and
+   * a message safe to show. Only genuinely unexpected failures are wrapped.
+   */
+  private rethrow(error: unknown, fallbackCode: string, fallbackMessage: string): never {
+    if (error instanceof LibreLinkApiError) {
+      throw error;
+    }
+
+    const wrapped = new Error(
+      `${fallbackMessage}${error instanceof Error ? `: ${error.message}` : ''}`
+    ) as Error & { code: string };
+    wrapped.code = fallbackCode;
+    throw wrapped;
+  }
+
+  async getCurrentGlucose(): Promise<GlucoseReading> {
     try {
-      const libreReading = await this.client.read();
-      const reading = this.mapGlucoseReading(libreReading);
-      
-      this.setCachedData(cacheKey, reading);
+      const graph = await this.getGraph();
+      const item = graph.connection.glucoseItem ?? graph.connection.glucoseMeasurement;
+
+      if (!item) {
+        throw new LibreLinkApiError(
+          'SENSOR_UNAVAILABLE',
+          'The sensor returned no current glucose measurement. It may be warming up, out of range of the phone, or expired.'
+        );
+      }
+
+      const reading = this.mapGlucoseReading(item);
       this.lastReading = reading;
-      
       return reading;
     } catch (error) {
-      throw this.createError('GLUCOSE_READ_FAILED', 'Failed to read current glucose', error);
+      this.rethrow(error, 'GLUCOSE_READ_FAILED', 'Failed to read current glucose');
     }
   }
 
   async getGlucoseHistory(hours: number = 24): Promise<GlucoseReading[]> {
-    const cacheKey = `history_${hours}h`;
-    const cached = this.getCachedData(cacheKey);
-    if (cached) {
-      return cached;
-    }
-
-    await this.ensureLoggedIn();
-
     try {
-      // Get history - the unofficial API should have a history method
-      const libreReadings = await this.client.history();
-      
-      if (!libreReadings || libreReadings.length === 0) {
-        throw this.createError('NO_HISTORY_DATA', 'No glucose history data available');
+      const graph = await this.getGraph();
+
+      if (graph.graphData.length === 0) {
+        throw new LibreLinkApiError(
+          'SENSOR_UNAVAILABLE',
+          'LibreLink Up returned no glucose history. The sensor may be warming up or no data has been uploaded yet.'
+        );
       }
 
       const cutoffTime = new Date(Date.now() - hours * 60 * 60 * 1000);
-      const readings = libreReadings
-        .filter((reading: LibreGlucoseReading) => reading.timestamp >= cutoffTime)
-        .map((reading: LibreGlucoseReading) => this.mapGlucoseReading(reading))
+      return graph.graphData
+        .map(item => this.mapGlucoseReading(item))
+        .filter(reading => reading.timestamp >= cutoffTime)
         .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
-
-      this.setCachedData(cacheKey, readings);
-      return readings;
     } catch (error) {
-      throw this.createError('HISTORY_READ_FAILED', 'Failed to read glucose history', error);
+      this.rethrow(error, 'HISTORY_READ_FAILED', 'Failed to read glucose history');
     }
+  }
+
+  private mapSensor(active: LibreActiveSensor, latestReadingAt: Date | null): SensorInfo {
+    const activationTime = new Date(active.sensor.a * 1000);
+    const isFresh =
+      latestReadingAt !== null && Date.now() - latestReadingAt.getTime() < STALE_READING_MS;
+
+    return {
+      deviceId: active.sensor.deviceId,
+      serialNumber: active.sensor.sn,
+      activationTime,
+      state: isFresh ? 'Active' : 'No recent data',
+      deviceType: DEVICE_TYPE_NAMES[active.device.dtid] ?? `Unknown (device type ${active.device.dtid})`
+    };
   }
 
   async getSensorInfo(): Promise<SensorInfo[]> {
-    const cacheKey = 'sensor_info';
-    const cached = this.getCachedData(cacheKey);
-    if (cached) {
-      return cached;
-    }
-
-    await this.ensureLoggedIn();
-
     try {
-      // Since fetchConnections has issues, just create sensor info from user data
-      const user = this.client.me;
-      
-      // Try to get a current reading to verify sensor is active
-      let isActive = false;
-      try {
-        const reading = await this.client.read();
-        isActive = reading && reading.value > 0;
-      } catch (readError) {
-        // If read fails, sensor might not be active
-        isActive = false;
+      const graph = await this.getGraph();
+      const item = graph.connection.glucoseItem ?? graph.connection.glucoseMeasurement;
+      const latestReadingAt = item ? new Date(item.Timestamp) : null;
+
+      if (graph.activeSensors.length > 0) {
+        return graph.activeSensors.map(sensor => this.mapSensor(sensor, latestReadingAt));
       }
-      
-      const sensors: SensorInfo[] = [{
-        deviceId: user && user.id ? user.id : 'sensor-1',
-        serialNumber: 'FreeStyle-Libre-3',
-        activationTime: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000), // Assume 7 days ago
-        state: isActive ? 'Active' : 'Unknown',
-        deviceType: 'FreeStyle Libre 3'
-      }];
 
-      this.setCachedData(cacheKey, sensors);
-      return sensors;
+      // The connection can still carry sensor details when activeSensors is empty.
+      if (graph.connection.sensor) {
+        return [
+          this.mapSensor(
+            { sensor: graph.connection.sensor, device: { did: '', dtid: -1 } },
+            latestReadingAt
+          )
+        ];
+      }
+
+      throw new LibreLinkApiError(
+        'SENSOR_UNAVAILABLE',
+        'No active sensor is reported for this LibreLinkUp connection.'
+      );
     } catch (error) {
-      // If we can't get sensor info, return a basic response
-      const sensors: SensorInfo[] = [{
-        deviceId: 'sensor-unknown',
-        serialNumber: 'unknown',
-        activationTime: new Date(),
-        state: 'Unknown',
-        deviceType: 'FreeStyle Libre'
-      }];
-      
-      return sensors;
+      this.rethrow(error, 'SENSOR_INFO_FAILED', 'Failed to read sensor information');
     }
   }
 
-  async validateConnection(): Promise<boolean> {
+  /**
+   * Report why a connection failed rather than collapsing every cause into
+   * "check your credentials or sensor" — an auth or API-compatibility failure
+   * is not a sensor problem.
+   */
+  async validateConnection(): Promise<ConnectionValidationResult> {
     try {
-      await this.ensureLoggedIn();
-      // Just try to read glucose data - if it works, connection is valid
-      await this.client.read();
-      return true;
+      await this.api.login();
+      const connections = await this.api.fetchConnections();
+
+      if (connections.length === 0) {
+        // Produces the account-type-aware NO_CONNECTIONS message.
+        await this.api.getPatientId();
+      }
+
+      await this.getCurrentGlucose();
+      return { valid: true };
     } catch (error) {
-      this.isLoggedIn = false;
-      return false;
+      if (error instanceof LibreLinkApiError) {
+        return { valid: false, code: error.code, message: error.message };
+      }
+      return {
+        valid: false,
+        code: 'UNKNOWN_ERROR',
+        message: error instanceof Error ? error.message : 'Unknown error'
+      };
     }
   }
 
-  // Method to start streaming (for future use)
-  async startStream(callback: (reading: GlucoseReading) => void, intervalMs: number = 60000): Promise<void> {
-    await this.ensureLoggedIn();
-    
-    try {
-      const stream = this.client.stream();
-      
-      for await (const libreReading of stream) {
-        const reading = this.mapGlucoseReading(libreReading);
+  clearCache(): void {
+    this.cache.clear();
+  }
+
+  /** Poll for new readings. Kept for future streaming support. */
+  async startStream(
+    callback: (reading: GlucoseReading) => void,
+    intervalMs: number = 60000
+  ): Promise<void> {
+    for (;;) {
+      this.cache.delete('graph');
+      const reading = await this.getCurrentGlucose();
+
+      if (!this.lastReading || reading.timestamp.getTime() !== this.lastReading.timestamp.getTime()) {
         callback(reading);
-        
-        // Add interval between readings
-        await new Promise(resolve => setTimeout(resolve, intervalMs));
       }
-    } catch (error) {
-      throw this.createError('STREAM_FAILED', 'Failed to start glucose streaming', error);
+
+      await new Promise(resolve => setTimeout(resolve, intervalMs));
     }
   }
 }
