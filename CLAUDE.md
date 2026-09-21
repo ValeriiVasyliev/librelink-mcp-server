@@ -31,7 +31,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
    - `get_glucose_stats` - Time-in-range and statistics
    - `get_glucose_trends` - Pattern analysis (dawn phenomenon, meal response)
    - `get_sensor_info` - Sensor status information
-   - `configure_credentials` - LibreLink authentication setup
+   - `configure_credentials` - Account region only; rejects `email`/`password` (credentials must be set via `npm run configure`, never over MCP)
    - `configure_ranges` - Target glucose range configuration
    - `validate_connection` - Connection testing
 
@@ -51,7 +51,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 4. **Configuration Management** (`src/config.ts`): Handles secure credential storage:
    - Stores config in `~/.librelink-mcp/config.json`
-   - Automatically sets file permissions to 600 (user-only)
+   - Re-asserts permissions on every save: file `600`, directory `700` (user-only)
    - Supports credential updates and range configuration
 
 ### Key Design Patterns
@@ -73,4 +73,5 @@ This MCP server is designed to work alongside other health MCP servers in Claude
 - **No linting setup**: Currently no ESLint/Prettier configuration
 - **ES Modules**: Project uses ES modules (`"type": "module"` in package.json)
 - **Node 18+ required**: Uses modern Node.js features
-- **Unofficial API**: Uses `libre-link-unofficial-api` community package
+- **Unofficial API**: Talks to LibreLink Up through `src/librelink-api.ts`, a self-contained client. The `libre-link-unofficial-api` package it replaced is no longer a dependency (it pinned `version: 4.7.0` and could not send the required `Account-Id` header).
+- **Credentials never travel over MCP**: tool arguments are recorded in conversation history. `configure_credentials` therefore rejects `email`/`password`; the only supported path is `npm run configure`.

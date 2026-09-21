@@ -69,9 +69,20 @@ Interactively:
 npm run configure
 ```
 
-Or through the MCP tools `configure_credentials` and `configure_ranges` —
-see [tools.md](tools.md). Editing the JSON by hand works too; the server reads
-it at startup, so restart the MCP host afterwards.
+This is the only supported way to set the email and password. The prompt does
+not echo the password, and the file is written with mode `600` inside a
+directory forced to `700` on every save.
+
+Everything else — region and target ranges — can also be set through the MCP
+tools `configure_credentials` and `configure_ranges`, see [tools.md](tools.md).
+Those tools reject `email` and `password`: arguments to an MCP tool land in the
+host's conversation history, so credentials must not travel that way.
+
+Editing the JSON by hand works too; the server reads it at startup, so restart
+the MCP host afterwards.
+
+> The config file holds your LibreLink password in plaintext. File permissions
+> are the only thing protecting it, so keep it off shared or backed-up volumes.
 
 ## Registering the server
 
