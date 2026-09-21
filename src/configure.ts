@@ -14,6 +14,33 @@ function question(query: string): Promise<string> {
   });
 }
 
+/**
+ * Prompt without echoing the answer, so a password never lands in the
+ * terminal scrollback of whoever runs `npm run configure`.
+ *
+ * readline has no public masking option; overriding `_writeToOutput` is the
+ * established way to do this. The prompt itself is still echoed — only the
+ * characters the user types are swallowed.
+ */
+function secretQuestion(query: string): Promise<string> {
+  return new Promise(resolve => {
+    const internal = rl as unknown as { _writeToOutput?: (chunk: string) => void };
+    const originalWrite = internal._writeToOutput;
+
+    internal._writeToOutput = function (chunk: string) {
+      if (chunk.includes(query)) {
+        originalWrite?.call(internal, chunk);
+      }
+    };
+
+    rl.question(query, answer => {
+      internal._writeToOutput = originalWrite;
+      process.stdout.write('\n');
+      resolve(answer);
+    });
+  });
+}
+
 async function main() {
   console.log('LibreLink MCP Server Configuration');
   console.log('==================================\n');
@@ -23,7 +50,9 @@ async function main() {
 
   // Configure credentials
   const email = await question(`LibreLink email (current: ${currentConfig.credentials.email || 'not set'}): `);
-  const password = await question('LibreLink password (current: hidden): ');
+  const password = await secretQuestion(
+    `LibreLink password (${currentConfig.credentials.password ? 'press Enter to keep the current one' : 'not set'}): `
+  );
   
   // Configure region
   console.log('\nAvailable regions:');
@@ -36,11 +65,16 @@ async function main() {
   const targetLow = await question(`Target glucose low (mg/dL, current: ${currentConfig.ranges.target_low}): `);
   const targetHigh = await question(`Target glucose high (mg/dL, current: ${currentConfig.ranges.target_high}): `);
 
-  // Update configuration
-  if (email.trim()) {
-    configManager.updateCredentials(email.trim(), password);
+  // Update configuration. A blank answer keeps the stored value, so that
+  // re-running configure to change only the region cannot wipe a credential.
+  const nextEmail = email.trim() || currentConfig.credentials.email;
+  const nextPassword = password || currentConfig.credentials.password;
+
+  if (nextEmail !== currentConfig.credentials.email || nextPassword !== currentConfig.credentials.password) {
+    configManager.updateCredentials(nextEmail, nextPassword);
   }
-  
+
+
   configManager.updateRegion(region as 'US' | 'EU');
   
   if (targetLow.trim() && targetHigh.trim()) {

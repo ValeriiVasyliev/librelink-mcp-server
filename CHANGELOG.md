@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+A review of the whole tree found no backdoors, no unexpected network
+destinations (only `api-us`/`api-eu.libreview.io`), no install hooks in any of
+the 120 transitive dependencies, and no code that logs a credential. It did
+surface three weaknesses in how credentials are handled locally.
+
+- **`configure_credentials` no longer accepts `email` or `password`.**
+  Arguments passed to an MCP tool are recorded in the host's conversation
+  history, which is not an appropriate store for a password. The tool now takes
+  only `region`, and **rejects** the credential fields rather than ignoring
+  them, so a caller that sent a password learns it was not stored and should
+  treat the value as exposed. Credentials are set with `npm run configure`.
+
+  This is a breaking change to that tool's schema. The other seven tools are
+  unchanged.
+
+- **`npm run configure` no longer echoes the password.** The prompt used plain
+  `readline`, so the password appeared on screen and stayed in terminal
+  scrollback. Input is now masked. A blank answer at the email or password
+  prompt keeps the stored value, so re-running configure to change only the
+  region can no longer wipe a credential.
+
+- **Config directory permissions are re-asserted on every save.** `mkdirSync`
+  applies its `mode` only when it actually creates the directory, and even then
+  the process umask can loosen it, so a directory created by an earlier version
+  could sit at `755`. Every save now forces `700` on the directory alongside
+  the existing `600` on the file.
+
+The config file still holds the password in plaintext; file permissions remain
+the only thing protecting it.
+
+### Fixed — tests
+
+- **`npm test` no longer exits 0 when MCP tests fail.** `test-mcp.js` reported
+  failures in its output but never set a non-zero exit code, which had hidden a
+  stale assertion in that file.
+
+- **The MCP suite no longer authenticates as the real user.** It relied on
+  `configure_credentials` overwriting the config with test data as a side
+  effect to reach an unauthenticated state. With that side effect gone, the
+  auth-failure tests were passing against the runner's live LibreLink account.
+  The suite now writes its own fixture config before starting the server, and
+  still backs up and restores the real file.
+
 ### Fixed — analytics
 
 The analytics module reported reassuring findings it had no data to support.

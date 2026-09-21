@@ -155,12 +155,25 @@ The `time_in_range` keys reflect the **configured** range. After
 
 | Parameter | Type | Required |
 | --- | --- | --- |
-| `email` | string | yes |
-| `password` | string | yes |
-| `region` | `US` \| `EU` | no (default `US`) |
+| `region` | `US` \| `EU` | yes |
 
 Writes to `~/.librelink-mcp/config.json` with mode `600` and reinitializes the
 client. Must be a LibreLink **Up** (follower) account.
+
+**This tool does not accept `email` or `password`, by design.** Arguments passed
+to an MCP tool are recorded in the host's conversation history, which is not an
+appropriate store for credentials. Passing either parameter is rejected with an
+error rather than silently ignored, so a caller that sent a password learns that
+it was not stored and should be treated as exposed.
+
+Set credentials locally instead:
+
+```bash
+npm run configure
+```
+
+That prompt does not echo the password, and writes it to
+`~/.librelink-mcp/config.json` (mode `600`, in a directory forced to `700`).
 
 ### `configure_ranges`
 

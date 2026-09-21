@@ -126,25 +126,21 @@ const tools: Tool[] = [
   },
   {
     name: 'configure_credentials',
-    description: 'Set up or update your LibreLink account credentials for data access. Required before using any glucose reading tools. Credentials are stored securely on your local machine only.',
+    description:
+      'Set the LibreLink account region. This tool deliberately does NOT accept an email or password: ' +
+      'anything passed to an MCP tool is recorded in conversation history, which is not an appropriate ' +
+      'place for credentials. Set those by running `npm run configure` in a local terminal, which stores ' +
+      'them in ~/.librelink-mcp/config.json readable only by your user account.',
     inputSchema: {
       type: 'object',
       properties: {
-        email: {
-          type: 'string',
-          description: 'Your LibreLink account email address (same as used in the LibreLink app)'
-        },
-        password: {
-          type: 'string',
-          description: 'Your LibreLink account password'
-        },
         region: {
           type: 'string',
           enum: ['US', 'EU'],
-          description: 'Your LibreLink account region. US for United States, EU for Europe. Default: US'
+          description: 'Your LibreLink account region. US for United States, EU for Europe.'
         }
       },
-      required: ['email', 'password']
+      required: ['region']
     }
   },
   {
@@ -312,24 +308,36 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'configure_credentials': {
-        const { email, password, region } = args as { 
-          email: string; 
-          password: string; 
-          region?: 'US' | 'EU' 
-        };
+        const { region } = args as { region?: 'US' | 'EU' };
 
-        configManager.updateCredentials(email, password);
-        if (region) {
-          configManager.updateRegion(region);
+        // Refuse rather than silently ignore: a caller that sent a password needs
+        // to know it was not stored, and that the value it sent is now in the
+        // conversation history and should be treated as exposed.
+        const secretKeys = ['email', 'password'].filter(
+          key => args !== undefined && Object.prototype.hasOwnProperty.call(args, key)
+        );
+        if (secretKeys.length > 0) {
+          throw new Error(
+            `This tool does not accept ${secretKeys.join(' or ')}. Credentials passed to an MCP tool are ` +
+              'recorded in conversation history, so they must be set locally instead: run `npm run configure` ' +
+              'in a terminal. If a password was just sent, consider it exposed and change it.'
+          );
         }
 
-        // Reinitialize client with new credentials
+        if (region !== 'US' && region !== 'EU') {
+          throw new Error("Region must be either 'US' or 'EU'.");
+        }
+
+        configManager.updateRegion(region);
+
+        // Reinitialize client so the new region takes effect.
         initializeClient();
 
         return {
           content: [{
             type: 'text',
-            text: 'LibreLink credentials configured successfully. Use validate_connection to test.'
+            text: `LibreLink region set to ${region}. Use validate_connection to test. ` +
+              'To set the account email and password, run `npm run configure` locally.'
           }]
         };
       }

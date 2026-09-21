@@ -74,6 +74,11 @@ export class ConfigManager {
       // Ensure config directory exists
       mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
 
+      // `mode` above only applies when mkdir actually creates the directory, and
+      // even then it is masked by the process umask. Re-assert it every save so a
+      // directory created by an older version (or under a lax umask) is tightened.
+      chmodSync(CONFIG_DIR, 0o700);
+
       // The file holds LibreLink credentials, so keep it readable by the user only.
       writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 });
       chmodSync(CONFIG_FILE, 0o600);

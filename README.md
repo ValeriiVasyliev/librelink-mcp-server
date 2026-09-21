@@ -193,7 +193,7 @@ When combined with other health MCP servers:
 | `get_glucose_stats` | Statistics and time-in-range | `days` (default: 7) |
 | `get_glucose_trends` | Pattern analysis | `period` (daily/weekly/monthly) |
 | `get_sensor_info` | Sensor status and info | None |
-| `configure_credentials` | Update LibreLink credentials | `email`, `password`, `region` |
+| `configure_credentials` | Set account region (credentials are **not** accepted over MCP — see below) | `region` |
 | `configure_ranges` | Set target glucose ranges | `target_low`, `target_high` |
 | `validate_connection` | Test LibreLink connection | None |
 

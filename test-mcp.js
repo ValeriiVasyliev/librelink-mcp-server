@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 
 import { spawn } from 'child_process';
-import { createWriteStream, copyFileSync, existsSync, unlinkSync, renameSync } from 'fs';
+import { createWriteStream, copyFileSync, existsSync, unlinkSync, renameSync, writeFileSync, mkdirSync } from 'fs';
 import { homedir } from 'os';
-import { join } from 'path';
+import { join, dirname } from 'path';
 
 /**
- * This suite exercises the real `configure_credentials` tool, which writes to
- * the user's config file. Back it up first and always put it back, so running
- * the tests can never destroy real credentials.
+ * This suite replaces the user's config with a test fixture so it never
+ * authenticates against a real LibreLink account. Back the real file up first
+ * and always put it back, so running the tests cannot destroy real credentials.
  */
 const CONFIG_FILE = join(homedir(), '.librelink-mcp', 'config.json');
 const CONFIG_BACKUP = `${CONFIG_FILE}.test-backup`;
@@ -17,6 +17,33 @@ function backupUserConfig() {
   if (existsSync(CONFIG_FILE)) {
     copyFileSync(CONFIG_FILE, CONFIG_BACKUP);
   }
+}
+
+/**
+ * Install known-bad credentials before the server starts.
+ *
+ * The suite asserts that auth-dependent tools fail. It used to get that state
+ * as a side effect of `configure_credentials` overwriting the config with test
+ * data; that tool no longer accepts credentials, so the fixture is written here
+ * instead. This also stops the suite from authenticating against the real
+ * LibreLink account of whoever runs it.
+ */
+function writeTestConfig() {
+  mkdirSync(dirname(CONFIG_FILE), { recursive: true, mode: 0o700 });
+  writeFileSync(
+    CONFIG_FILE,
+    JSON.stringify(
+      {
+        credentials: { email: 'test@example.com', password: 'testpassword' },
+        client: { version: '4.16.0', region: 'US' },
+        cache: { enabled: false, ttl_minutes: 5 },
+        ranges: { target_low: 70, target_high: 180 }
+      },
+      null,
+      2
+    ),
+    { mode: 0o600 }
+  );
 }
 
 function restoreUserConfig() {
@@ -150,11 +177,48 @@ class MCPTester {
   }
 
   async testConfigureCredentials() {
-    this.log('Testing configure_credentials with test data...');
-    
+    this.log('Testing configure_credentials sets the region...');
+
     const message = {
       jsonrpc: '2.0',
       id: 2,
+      method: 'tools/call',
+      params: {
+        name: 'configure_credentials',
+        arguments: { region: 'US' }
+      }
+    };
+
+    try {
+      const response = await this.sendMCPMessage(message);
+
+      if (response.result && response.result.content) {
+        const content = response.result.content[0].text;
+        if (content.includes('region set to US')) {
+          this.log('✅ Region configuration successful');
+          return true;
+        }
+        this.log(`❌ Unexpected response: ${content}`);
+        return false;
+      }
+      this.log('❌ No content in configure_credentials response');
+      return false;
+    } catch (error) {
+      this.log(`❌ Error testing configure_credentials: ${error.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Credentials passed to an MCP tool end up in conversation history, so the
+   * tool must refuse them outright rather than accept and store them.
+   */
+  async testConfigureCredentialsRejectsSecrets() {
+    this.log('Testing configure_credentials refuses email/password...');
+
+    const message = {
+      jsonrpc: '2.0',
+      id: 5,
       method: 'tools/call',
       params: {
         name: 'configure_credentials',
@@ -168,22 +232,23 @@ class MCPTester {
 
     try {
       const response = await this.sendMCPMessage(message);
-      
-      if (response.result && response.result.content) {
-        const content = response.result.content[0].text;
-        if (content.includes('configured successfully')) {
-          this.log('✅ Credentials configuration successful');
-          return true;
-        } else {
-          this.log(`❌ Unexpected response: ${content}`);
-          return false;
-        }
-      } else {
-        this.log('❌ No content in configure_credentials response');
+      const text = JSON.stringify(response);
+
+      if (!/does not accept/i.test(text)) {
+        this.log(`❌ Secrets were not rejected: ${text}`);
         return false;
       }
+
+      // The rejection must not echo the password back to the caller.
+      if (text.includes('testpassword')) {
+        this.log('❌ Rejection echoed the submitted password');
+        return false;
+      }
+
+      this.log('✅ Credentials rejected without echoing the password');
+      return true;
     } catch (error) {
-      this.log(`❌ Error testing configure_credentials: ${error.message}`);
+      this.log(`❌ Error testing credential rejection: ${error.message}`);
       return false;
     }
   }
@@ -281,12 +346,14 @@ class MCPTester {
     let total = 0;
 
     backupUserConfig();
+    writeTestConfig();
 
     try {
       // Start server
       const serverStarted = await this.startServer();
       if (!serverStarted) {
         this.log('❌ Failed to start server');
+        process.exitCode = 1;
         return;
       }
 
@@ -294,6 +361,7 @@ class MCPTester {
       const tests = [
         this.testListTools.bind(this),
         this.testConfigureCredentials.bind(this),
+        this.testConfigureCredentialsRejectsSecrets.bind(this),
         this.testValidateConnection.bind(this),
         this.testGlucoseDataWithoutAuth.bind(this)
       ];
@@ -325,6 +393,9 @@ class MCPTester {
       console.log('3. Integrate with Claude Desktop');
     } else {
       console.log('⚠️  Some tests failed. Check the output above for details.');
+      // Without this the suite exits 0 and `npm test` reports success even
+      // though tests failed, which hid a stale assertion in this file.
+      process.exitCode = 1;
     }
   }
 }
